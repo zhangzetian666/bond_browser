@@ -3,6 +3,8 @@
 债券数据浏览器 V3
 支持债券类型筛选、央企独立板块、右键复制、分类明细展示。
 """
+import json
+import math
 import os
 import sys
 import tkinter as tk
@@ -124,6 +126,327 @@ class ScrollableButtonGrid(ttk.Frame):
             self.add_button(r, c, text, lambda t=tag: callback(t))
         for c in range(self.cols):
             self.inner.columnconfigure(c, weight=1)
+
+
+
+
+class ProvinceMapCanvas(tk.Canvas):
+    """中国省份地图 Canvas（B 方案）：基于 GeoJSON 真实边界，支持悬停高亮和点击。"""
+
+    # Excel 全名/简称 -> GeoJSON 中的短名
+    NAME_ALIASES = {
+        "北京": "北京", "北京市": "北京",
+        "天津": "天津", "天津市": "天津",
+        "上海": "上海", "上海市": "上海",
+        "重庆": "重庆", "重庆市": "重庆",
+        "黑龙江": "黑龙江", "黑龙江省": "黑龙江",
+        "吉林": "吉林", "吉林省": "吉林",
+        "辽宁": "辽宁", "辽宁省": "辽宁",
+        "河北": "河北", "河北省": "河北",
+        "山西": "山西", "山西省": "山西",
+        "内蒙古": "内蒙古", "内蒙古自治区": "内蒙古",
+        "陕西": "陕西", "陕西省": "陕西",
+        "甘肃": "甘肃", "甘肃省": "甘肃",
+        "青海": "青海", "青海省": "青海",
+        "宁夏": "宁夏", "宁夏回族自治区": "宁夏",
+        "新疆": "新疆", "新疆维吾尔自治区": "新疆",
+        "山东": "山东", "山东省": "山东",
+        "江苏": "江苏", "江苏省": "江苏",
+        "安徽": "安徽", "安徽省": "安徽",
+        "浙江": "浙江", "浙江省": "浙江",
+        "福建": "福建", "福建省": "福建",
+        "江西": "江西", "江西省": "江西",
+        "河南": "河南", "河南省": "河南",
+        "湖北": "湖北", "湖北省": "湖北",
+        "湖南": "湖南", "湖南省": "湖南",
+        "广东": "广东", "广东省": "广东",
+        "广西": "广西", "广西壮族自治区": "广西",
+        "海南": "海南", "海南省": "海南",
+        "四川": "四川", "四川省": "四川",
+        "贵州": "贵州", "贵州省": "贵州",
+        "云南": "云南", "云南省": "云南",
+        "西藏": "西藏", "西藏自治区": "西藏",
+        "台湾": "台湾", "台湾省": "台湾",
+        "香港": "香港", "香港特别行政区": "香港",
+        "澳门": "澳门", "澳门特别行政区": "澳门",
+    }
+
+    def __init__(self, parent, province_counts, on_select, bg="#f8f9fa", **kwargs):
+        super().__init__(parent, bg=bg, highlightthickness=0, **kwargs)
+        self.province_counts = province_counts or {}
+        self.on_select = on_select
+        self.padding = 20
+
+        self.features = []       # [{"name": short_name, "polygons": [[(lon,lat),...],...]}, ...]
+        self.items = {}          # short_name -> {"polygons": [ids], "text": id, ...}
+        self.hovered = None
+        self.tooltip = None
+        self._pending_draw = None
+
+        self._load_geojson()
+        self.bind("<Configure>", self._on_configure)
+        self.bind("<Motion>", self._on_mouse_move)
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Leave>", self._on_leave)
+
+        self._draw_map()
+
+    def _load_geojson(self):
+        path = resource_path("china_provinces.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"加载地图数据失败: {e}")
+            data = {"features": []}
+
+        all_lons = []
+        all_lats = []
+        for feat in data.get("features", []):
+            short_name = feat["properties"]["name"]
+            geom = feat["geometry"]
+            polygons = []
+            if geom["type"] == "Polygon":
+                polygons = [ring[:-1] for ring in geom["coordinates"]]
+            elif geom["type"] == "MultiPolygon":
+                for poly in geom["coordinates"]:
+                    polygons.extend([ring[:-1] for ring in poly])
+            if not polygons:
+                continue
+            for ring in polygons:
+                for lon, lat in ring:
+                    all_lons.append(lon)
+                    all_lats.append(lat)
+            self.features.append({"name": short_name, "polygons": polygons})
+
+        if all_lons:
+            self.min_lon = min(all_lons)
+            self.max_lon = max(all_lons)
+            self.min_lat = min(all_lats)
+            self.max_lat = max(all_lats)
+        else:
+            self.min_lon, self.max_lon = 70, 140
+            self.min_lat, self.max_lat = 15, 55
+
+    def update_counts(self, province_counts):
+        self.province_counts = province_counts or {}
+        self._draw_map()
+
+    def _normalize_name(self, name):
+        if not name:
+            return name
+        return self.NAME_ALIASES.get(name.strip(), name.strip())
+
+    def _color_for(self, count):
+        counts = list(self.province_counts.values()) if self.province_counts else [1]
+        max_count = max(counts) if counts else 1
+        ratio = min(1.0, count / max(1, max_count))
+        r = int(207 - ratio * (207 - 13))
+        g = int(226 - ratio * (226 - 110))
+        b = int(255 - ratio * (255 - 253))
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _lighten(self, color):
+        return "#5c9dff"
+
+    def _project(self, lon, lat):
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        pad = self.padding
+        usable_w = width - 2 * pad
+        usable_h = height - 2 * pad
+        lon_range = self.max_lon - self.min_lon or 1
+        lat_range = self.max_lat - self.min_lat or 1
+        # 保持地图纵横比，居中显示
+        map_ratio = lon_range / lat_range
+        canvas_ratio = usable_w / usable_h
+        if canvas_ratio > map_ratio:
+            scale = usable_h / lat_range
+            offset_x = (usable_w - lon_range * scale) / 2
+            offset_y = 0
+        else:
+            scale = usable_w / lon_range
+            offset_x = 0
+            offset_y = (usable_h - lat_range * scale) / 2
+        x = pad + offset_x + (lon - self.min_lon) * scale
+        y = pad + offset_y + (self.max_lat - lat) * scale
+        return x, y
+
+    def _draw_map(self):
+        self.delete("all")
+        self.items = {}
+        counts_by_short = {
+            self._normalize_name(k): v
+            for k, v in self.province_counts.items()
+        }
+
+        for feat in self.features:
+            short_name = feat["name"]
+            count = counts_by_short.get(short_name, 0)
+            color = self._color_for(count)
+            poly_ids = []
+            centroid_x, centroid_y, total_area = 0, 0, 0
+            for ring in feat["polygons"]:
+                pts = []
+                for lon, lat in ring:
+                    x, y = self._project(lon, lat)
+                    pts.extend([x, y])
+                if len(pts) >= 6:
+                    pid = self.create_polygon(pts, fill=color, outline="#ffffff", width=1, smooth=False)
+                    poly_ids.append(pid)
+                    n = len(pts) // 2
+                    cx = sum(pts[i] for i in range(0, len(pts), 2)) / n
+                    cy = sum(pts[i + 1] for i in range(0, len(pts), 2)) / n
+                    area = abs(sum(
+                        pts[i] * pts[(i + 3) % len(pts)] - pts[i + 1] * pts[(i + 2) % len(pts)]
+                        for i in range(0, len(pts), 2)
+                    )) / 2
+                    centroid_x += cx * area
+                    centroid_y += cy * area
+                    total_area += area
+
+            if total_area > 0:
+                centroid_x /= total_area
+                centroid_y /= total_area
+            else:
+                first = feat["polygons"][0][0]
+                centroid_x, centroid_y = self._project(first[0], first[1])
+
+            display_name = short_name
+            count_text = f"{count}家"
+            tid = self.create_text(
+                centroid_x, centroid_y - 6,
+                text=display_name, font=("Microsoft YaHei", 9, "bold"),
+                fill="white", justify="center"
+            )
+            cid = self.create_text(
+                centroid_x, centroid_y + 10,
+                text=count_text, font=("Microsoft YaHei", 8),
+                fill="white", justify="center"
+            )
+            self.items[short_name] = {
+                "polygons": poly_ids,
+                "text": tid,
+                "count_text": cid,
+                "base_color": color,
+            }
+
+    def _on_configure(self, event):
+        # 立即重绘；连续 resize 时通过 cancel/after 做少量防抖
+        self._draw_map()
+        if self._pending_draw:
+            self.after_cancel(self._pending_draw)
+        self._pending_draw = self.after(50, self._draw_map)
+
+    def _point_in_polygons(self, lon, lat):
+        """射线法判断经纬度点落在哪个省份。"""
+        for feat in self.features:
+            for ring in feat["polygons"]:
+                inside = False
+                n = len(ring)
+                j = n - 1
+                for i in range(n):
+                    xi, yi = ring[i]
+                    xj, yj = ring[j]
+                    if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-12) + xi):
+                        inside = not inside
+                    j = i
+                if inside:
+                    return feat["name"]
+        return None
+
+    def _hit_test(self, x, y):
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        pad = self.padding
+        usable_w = width - 2 * pad
+        usable_h = height - 2 * pad
+        lon_range = self.max_lon - self.min_lon or 1
+        lat_range = self.max_lat - self.min_lat or 1
+        map_ratio = lon_range / lat_range
+        canvas_ratio = usable_w / usable_h
+        if canvas_ratio > map_ratio:
+            scale = usable_h / lat_range
+            offset_x = (usable_w - lon_range * scale) / 2
+            offset_y = 0
+        else:
+            scale = usable_w / lon_range
+            offset_x = 0
+            offset_y = (usable_h - lat_range * scale) / 2
+        lon = self.min_lon + (x - pad - offset_x) / scale
+        lat = self.max_lat - (y - pad - offset_y) / scale
+        return self._point_in_polygons(lon, lat)
+
+    def _count_for(self, short_name):
+        count = self.province_counts.get(short_name, 0)
+        for k, v in self.province_counts.items():
+            if self._normalize_name(k) == short_name:
+                count = v
+                break
+        return count
+
+    def _on_mouse_move(self, event):
+        province = self._hit_test(event.x, event.y)
+        if province == self.hovered:
+            self._move_tooltip(event.x, event.y)
+            return
+        if self.hovered and self.hovered in self.items:
+            item = self.items[self.hovered]
+            for pid in item["polygons"]:
+                self.itemconfig(pid, fill=item["base_color"])
+        self.hovered = province
+        if province:
+            item = self.items[province]
+            for pid in item["polygons"]:
+                self.itemconfig(pid, fill=self._lighten(item["base_color"]))
+            self._show_tooltip(event.x, event.y, province, self._count_for(province))
+        else:
+            self._hide_tooltip()
+
+    def _on_click(self, event):
+        province = self._hit_test(event.x, event.y)
+        if province and self.on_select:
+            raw_name = province
+            for k in self.province_counts:
+                if self._normalize_name(k) == province:
+                    raw_name = k
+                    break
+            self.on_select(raw_name)
+
+    def _on_leave(self, event):
+        if self.hovered and self.hovered in self.items:
+            item = self.items[self.hovered]
+            for pid in item["polygons"]:
+                self.itemconfig(pid, fill=item["base_color"])
+        self.hovered = None
+        self._hide_tooltip()
+
+    def _show_tooltip(self, x, y, province, count):
+        if self.tooltip is None:
+            self.tooltip = tk.Toplevel(self)
+            self.tooltip.wm_overrideredirect(True)
+            self.tooltip_label = ttk.Label(
+                self.tooltip,
+                text="",
+                font=("Microsoft YaHei", 10, "bold"),
+                background="#333333",
+                foreground="white",
+                padding=(8, 4),
+            )
+            self.tooltip_label.pack()
+        self.tooltip_label.config(text=f"{province}\n{count} 家")
+        self._move_tooltip(x, y)
+        self.tooltip.deiconify()
+
+    def _move_tooltip(self, x, y):
+        if self.tooltip:
+            cx = self.winfo_rootx() + x + 15
+            cy = self.winfo_rooty() + y + 15
+            self.tooltip.wm_geometry(f"+{cx}+{cy}")
+
+    def _hide_tooltip(self):
+        if self.tooltip:
+            self.tooltip.withdraw()
 
 
 class BondBrowserApp(tk.Tk):
@@ -296,7 +619,6 @@ class BondBrowserApp(tk.Tk):
 
         # 债券类型选择专用居中面板
         self.bond_type_frame = ttk.Frame(self.nav_frame)
-        self.bond_type_frame.grid(row=0, column=0)
         self.bond_type_frame.bind("<Configure>", lambda e: self._center_bond_type_frame())
         self.nav_frame.bind("<Configure>", lambda e: self._center_bond_type_frame())
 
@@ -312,15 +634,36 @@ class BondBrowserApp(tk.Tk):
         # 导航网格（全国/省份/城市）
         self.nav_sub_frame = ttk.Frame(self.nav_frame)
         self.nav_sub_frame.grid(row=0, column=0, sticky="nsew")
-        self.nav_sub_frame.rowconfigure(1, weight=1)
+        self.nav_sub_frame.rowconfigure(2, weight=1)
         self.nav_sub_frame.columnconfigure(0, weight=1)
         self.nav_sub_frame.grid_remove()
 
         self.nav_hint = ttk.Label(self.nav_sub_frame, text="")
-        self.nav_hint.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.nav_hint.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+
+        self.central_btn = tk.Button(
+            self.nav_sub_frame,
+            text="央企（0家）",
+            font=("Microsoft YaHei", 11, "bold"),
+            bg="#6f42c1",
+            fg="white",
+            activebackground="#5a32a3",
+            width=18,
+            command=self._on_central_btn_click,
+        )
+        self.central_btn.grid(row=1, column=0, pady=(0, 10))
+        self.central_btn.grid_remove()
 
         self.button_grid = ScrollableButtonGrid(self.nav_sub_frame, cols=5)
-        self.button_grid.grid(row=1, column=0, sticky="nsew")
+        self.button_grid.grid(row=2, column=0, sticky="nsew")
+
+        self.province_map = ProvinceMapCanvas(
+            self.nav_sub_frame,
+            province_counts={},
+            on_select=None,
+        )
+        self.province_map.grid(row=2, column=0, sticky="nsew")
+        self.province_map.grid_remove()
 
         self.detail_frame = ttk.Frame(self.content_frame)
         self.detail_frame.grid(row=0, column=0, sticky="nsew")
@@ -331,7 +674,9 @@ class BondBrowserApp(tk.Tk):
         self.detail_frame.grid_remove()
 
     def _center_bond_type_frame(self):
-        """让债券类型选择面板在窗口中居中。"""
+        """让债券类型选择面板在窗口中居中；只在债券类型选择层生效。"""
+        if self.current_level != 0:
+            return
         self.nav_frame.update_idletasks()
         w = self.nav_frame.winfo_width()
         h = self.nav_frame.winfo_height()
@@ -632,6 +977,7 @@ class BondBrowserApp(tk.Tk):
         self.detail_frame.grid_remove()
         self.nav_sub_frame.grid_remove()
         self.nav_frame.grid()
+        self.bond_type_frame.place(x=0, y=0)
         self.bond_type_frame.lift()
         self._center_bond_type_frame()
 
@@ -715,12 +1061,16 @@ class BondBrowserApp(tk.Tk):
     # ------------------------------------------------------------------
     # 导航逻辑
     # ------------------------------------------------------------------
+    def _on_central_btn_click(self):
+        self._show_level(2, province="CENTRAL")
+
     def _show_level(self, level, province=None, city=None):
         self.current_level = level
         self.current_province = province
         self.current_city = city
 
         self.detail_frame.grid_remove()
+        self.bond_type_frame.place_forget()
         self.nav_frame.grid()
         self.nav_sub_frame.grid()
 
@@ -730,22 +1080,34 @@ class BondBrowserApp(tk.Tk):
             self.title_lbl.config(text=f"{bt} — 全国省份/央企")
             self.nav_hint.config(text="央企为独立板块；点击省份进入该省下辖层级。")
             items = self._get_national_items(bt)
-            self.button_grid.fill(items, self._on_national_item_click)
+            central = next((c for n, c, t in items if t == "CENTRAL"), 0)
+            province_counts = {p: c for p, c, t in items if t not in ("CENTRAL",)}
+            self.central_btn.config(text=f"央企（{central}家）")
+            self.central_btn.grid()
+            self.button_grid.grid_remove()
+            self.province_map.update_counts(province_counts)
+            self.province_map.on_select = lambda name: self._show_level(2, province=name)
+            self.province_map.grid()
             self.status_lbl.config(text=self._national_status(bt, items))
 
-        elif level == 2:
-            self.title_lbl.config(text=f"{bt} — {province} 下辖层级")
-            self.nav_hint.config(text="点击层级查看发债主体明细。")
-            items = self._get_province_items(province)
-            self.button_grid.fill(items, self._on_province_item_click)
-            self.status_lbl.config(text=self._province_status(province, items))
+        else:
+            self.central_btn.grid_remove()
+            self.province_map.grid_remove()
+            self.button_grid.grid()
 
-        elif level == 3:
-            self.title_lbl.config(text=f"{bt} — {province} · {city} 下辖层级")
-            self.nav_hint.config(text="点击层级查看发债主体明细。")
-            items = self._get_city_items(province, city)
-            self.button_grid.fill(items, self._on_city_item_click)
-            self.status_lbl.config(text=self._city_status(items))
+            if level == 2:
+                self.title_lbl.config(text=f"{bt} — {province} 下辖层级")
+                self.nav_hint.config(text="点击层级查看发债主体明细。")
+                items = self._get_province_items(province)
+                self.button_grid.fill(items, self._on_province_item_click)
+                self.status_lbl.config(text=self._province_status(province, items))
+
+            elif level == 3:
+                self.title_lbl.config(text=f"{bt} — {province} · {city} 下辖层级")
+                self.nav_hint.config(text="点击层级查看发债主体明细。")
+                items = self._get_city_items(province, city)
+                self.button_grid.fill(items, self._on_city_item_click)
+                self.status_lbl.config(text=self._city_status(items))
 
     def _get_national_items(self, bond_type):
         items = []
@@ -936,9 +1298,12 @@ class BondBrowserApp(tk.Tk):
             self.detail_frame.grid_remove()
             self.nav_frame.grid()
             if self.current_level == 0:
+                self.nav_sub_frame.grid_remove()
+                self.bond_type_frame.place(x=0, y=0)
                 self.bond_type_frame.lift()
                 self._center_bond_type_frame()
             else:
+                self.bond_type_frame.place_forget()
                 self.nav_sub_frame.grid()
             self._update_title()
             self.status_lbl.config(text="")
