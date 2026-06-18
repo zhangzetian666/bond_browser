@@ -112,18 +112,18 @@ class ScrollableButtonGrid(ttk.Frame):
         for child in self.inner.winfo_children():
             child.destroy()
 
-    def add_button(self, row, col, text, command):
-        btn = ttk.Button(self.inner, text=text, width=16, command=command)
+    def add_button(self, row, col, text, command, width=16):
+        btn = ttk.Button(self.inner, text=text, width=width, command=command)
         btn.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
         return btn
 
-    def fill(self, items, callback):
+    def fill(self, items, callback, btn_width=16):
         """items: [(name, count, tag), ...]; callback(tag)"""
         self.clear()
         for i, (name, count, tag) in enumerate(items):
             r, c = divmod(i, self.cols)
             text = f"{name}\n({count})"
-            self.add_button(r, c, text, lambda t=tag: callback(t))
+            self.add_button(r, c, text, lambda t=tag: callback(t), width=btn_width)
         for c in range(self.cols):
             self.inner.columnconfigure(c, weight=1)
 
@@ -238,16 +238,19 @@ class ProvinceMapCanvas(tk.Canvas):
         return self.NAME_ALIASES.get(name.strip(), name.strip())
 
     def _color_for(self, count):
+        if count <= 0:
+            return "#cfe2ff"  # 无发债主体：淡蓝色
         counts = list(self.province_counts.values()) if self.province_counts else [1]
         max_count = max(counts) if counts else 1
         ratio = min(1.0, count / max(1, max_count))
-        r = int(207 - ratio * (207 - 13))
-        g = int(226 - ratio * (226 - 110))
-        b = int(255 - ratio * (255 - 253))
+        # 浅粉色 #ffd6e0 到深红色 #dc143c
+        r = int(255 - ratio * (255 - 220))
+        g = int(214 - ratio * (214 - 20))
+        b = int(224 - ratio * (224 - 60))
         return f"#{r:02x}{g:02x}{b:02x}"
 
     def _lighten(self, color):
-        return "#5c9dff"
+        return "#ff8fa3"
 
     def _project(self, lon, lat):
         width = max(1, self.winfo_width())
@@ -305,6 +308,13 @@ class ProvinceMapCanvas(tk.Canvas):
                     centroid_y += cy * area
                     total_area += area
 
+            # 计算省份边界框面积，据此决定是否显示文字
+            all_x = [pts[i] for i in range(0, len(pts), 2)]
+            all_y = [pts[i + 1] for i in range(0, len(pts), 2)]
+            bbox_w = max(all_x) - min(all_x)
+            bbox_h = max(all_y) - min(all_y)
+            bbox_area = bbox_w * bbox_h
+
             if total_area > 0:
                 centroid_x /= total_area
                 centroid_y /= total_area
@@ -312,18 +322,28 @@ class ProvinceMapCanvas(tk.Canvas):
                 first = feat["polygons"][0][0]
                 centroid_x, centroid_y = self._project(first[0], first[1])
 
-            display_name = short_name
-            count_text = f"{count}家"
-            tid = self.create_text(
-                centroid_x, centroid_y - 6,
-                text=display_name, font=("Microsoft YaHei", 9, "bold"),
-                fill="white", justify="center"
-            )
-            cid = self.create_text(
-                centroid_x, centroid_y + 10,
-                text=count_text, font=("Microsoft YaHei", 8),
-                fill="white", justify="center"
-            )
+            tid = None
+            cid = None
+            if bbox_area >= 600:
+                display_name = short_name
+                name_font = ("Microsoft YaHei", 12, "bold")
+                name_dy = -8
+                if bbox_area < 1800:
+                    # 较小省份只显示名称，字体稍小
+                    name_font = ("Microsoft YaHei", 10, "bold")
+                    name_dy = 0
+                tid = self.create_text(
+                    centroid_x, centroid_y + name_dy,
+                    text=display_name, font=name_font,
+                    fill="black", justify="center"
+                )
+                if bbox_area >= 1800:
+                    cid = self.create_text(
+                        centroid_x, centroid_y + 12,
+                        text=f"{count}家", font=("Microsoft YaHei", 10, "bold"),
+                        fill="black", justify="center"
+                    )
+
             self.items[short_name] = {
                 "polygons": poly_ids,
                 "text": tid,
@@ -450,7 +470,7 @@ class ProvinceMapCanvas(tk.Canvas):
 
 
 class BondBrowserApp(tk.Tk):
-    EXCEL_FILE = "债券数据浏览器20260616-v5.xlsx"
+    EXCEL_FILE = "债券数据浏览器20260616-v6.xlsx"
     USERS_FILE = "债市读者的问答社区-用户活跃-成员数据报表（所有成员).xlsx"
 
     # 兼容引用（也保留类属性，方便内部统一使用 self.XXX）
@@ -636,34 +656,48 @@ class BondBrowserApp(tk.Tk):
         self.nav_sub_frame.grid(row=0, column=0, sticky="nsew")
         self.nav_sub_frame.rowconfigure(2, weight=1)
         self.nav_sub_frame.columnconfigure(0, weight=1)
+        self.nav_sub_frame.columnconfigure(1, weight=3)
         self.nav_sub_frame.grid_remove()
 
         self.nav_hint = ttk.Label(self.nav_sub_frame, text="")
-        self.nav_hint.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.nav_hint.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         self.central_btn = tk.Button(
             self.nav_sub_frame,
             text="央企（0家）",
-            font=("Microsoft YaHei", 11, "bold"),
+            font=("Microsoft YaHei", 12, "bold"),
             bg="#6f42c1",
             fg="white",
             activebackground="#5a32a3",
-            width=18,
+            width=20,
             command=self._on_central_btn_click,
         )
-        self.central_btn.grid(row=1, column=0, pady=(0, 10))
+        self.central_btn.grid(row=1, column=0, columnspan=2, pady=(0, 10))
         self.central_btn.grid_remove()
 
-        self.button_grid = ScrollableButtonGrid(self.nav_sub_frame, cols=5)
-        self.button_grid.grid(row=2, column=0, sticky="nsew")
+        # 左侧省份按钮列表（含央企）
+        self.left_frame = ttk.Frame(self.nav_sub_frame)
+        self.left_frame.rowconfigure(0, weight=1)
+        self.left_frame.columnconfigure(0, weight=1)
+
+        self.province_list = ScrollableButtonGrid(self.left_frame, cols=1)
+        self.province_list.grid(row=0, column=0, sticky="nsew")
+
+        # 右侧地图
+        self.right_frame = ttk.Frame(self.nav_sub_frame)
+        self.right_frame.rowconfigure(0, weight=1)
+        self.right_frame.columnconfigure(0, weight=1)
 
         self.province_map = ProvinceMapCanvas(
-            self.nav_sub_frame,
+            self.right_frame,
             province_counts={},
             on_select=None,
         )
-        self.province_map.grid(row=2, column=0, sticky="nsew")
+        self.province_map.grid(row=0, column=0, sticky="nsew")
         self.province_map.grid_remove()
+
+        # 省/市/区县层级全宽按钮网格
+        self.button_grid = ScrollableButtonGrid(self.nav_sub_frame, cols=5)
 
         self.detail_frame = ttk.Frame(self.content_frame)
         self.detail_frame.grid(row=0, column=0, sticky="nsew")
@@ -700,13 +734,13 @@ class BondBrowserApp(tk.Tk):
         self.current_tab = None
 
         tab_names = ["汇总", "主体信息", "债券信息", "财务信息", "第一大收入构成"]
-        for tab_name in tab_names:
-            frame = ttk.Frame(parent)
-            frame.grid(row=2, column=0, sticky="nsew")
+        for idx, tab_name in enumerate(tab_names):
+            frame = tk.Frame(parent, relief="groove", bd=2, bg="#f8f9fa")
+            frame.grid(row=2, column=0, sticky="nsew", pady=(0, 5))
             self.tab_frames[tab_name] = frame
 
             tree_frame = ttk.Frame(frame)
-            tree_frame.pack(fill=tk.BOTH, expand=True)
+            tree_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
             tree_frame.rowconfigure(0, weight=1)
             tree_frame.columnconfigure(0, weight=1)
 
@@ -734,17 +768,22 @@ class BondBrowserApp(tk.Tk):
             btn = tk.Button(
                 self.tab_bar,
                 text=tab_name,
-                font=("Microsoft YaHei", 10),
+                font=("Microsoft YaHei", 10, "bold"),
                 width=14,
-                relief="flat",
-                bd=1,
-                bg="#f0f0f0",
+                relief="raised",
+                bd=2,
+                bg="#f8f9fa",
                 fg="#333333",
-                activebackground="#e0e0e0",
+                activebackground="#e2e6ea",
+                highlightbackground="#ced4da",
+                highlightthickness=1,
                 command=lambda t=tab_name: self._switch_tab(t),
             )
-            btn.pack(side=tk.LEFT, padx=2, pady=2)
+            btn.pack(side=tk.LEFT, padx=4, pady=4)
             self.tab_buttons[tab_name] = btn
+
+            if idx < len(tab_names) - 1:
+                ttk.Separator(self.tab_bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=2, pady=4)
 
         self._switch_tab("汇总")
 
@@ -873,8 +912,8 @@ class BondBrowserApp(tk.Tk):
         """配置全局 ttk 样式：滚动条加粗，标题字体加粗等。"""
         style = ttk.Style(self)
         # 滚动条加粗
-        style.configure("Vertical.TScrollbar", width=18, background="#d0d0d0", troughcolor="#f0f0f0", bordercolor="#c0c0c0")
-        style.configure("Horizontal.TScrollbar", width=18, background="#d0d0d0", troughcolor="#f0f0f0", bordercolor="#c0c0c0")
+        style.configure("Vertical.TScrollbar", width=26, background="#d0d0d0", troughcolor="#f0f0f0", bordercolor="#c0c0c0")
+        style.configure("Horizontal.TScrollbar", width=26, background="#d0d0d0", troughcolor="#f0f0f0", bordercolor="#c0c0c0")
         # Treeview 表头加粗
         style.configure("Treeview.Heading", font=("Microsoft YaHei", 10, "bold"))
 
@@ -1062,7 +1101,11 @@ class BondBrowserApp(tk.Tk):
     # 导航逻辑
     # ------------------------------------------------------------------
     def _on_central_btn_click(self):
-        self._show_level(2, province="CENTRAL")
+        rows = self._central_rows(self.current_bond_type)
+        if rows:
+            self._show_detail("— 央企", rows)
+        else:
+            messagebox.showinfo("提示", "当前债券类型下没有央企数据。")
 
     def _show_level(self, level, province=None, city=None):
         self.current_level = level
@@ -1078,13 +1121,16 @@ class BondBrowserApp(tk.Tk):
 
         if level == 1:
             self.title_lbl.config(text=f"{bt} — 全国省份/央企")
-            self.nav_hint.config(text="央企为独立板块；点击省份进入该省下辖层级。")
+            self.nav_hint.config(text="左侧为省份/央企按钮，右侧为地图；点击任意省份进入该省下辖层级。")
             items = self._get_national_items(bt)
             central = next((c for n, c, t in items if t == "CENTRAL"), 0)
             province_counts = {p: c for p, c, t in items if t not in ("CENTRAL",)}
             self.central_btn.config(text=f"央企（{central}家）")
             self.central_btn.grid()
             self.button_grid.grid_remove()
+            self.left_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+            self.right_frame.grid(row=2, column=1, sticky="nsew")
+            self.province_list.fill(items, self._on_national_item_click, btn_width=12)
             self.province_map.update_counts(province_counts)
             self.province_map.on_select = lambda name: self._show_level(2, province=name)
             self.province_map.grid()
@@ -1092,8 +1138,10 @@ class BondBrowserApp(tk.Tk):
 
         else:
             self.central_btn.grid_remove()
+            self.left_frame.grid_remove()
+            self.right_frame.grid_remove()
             self.province_map.grid_remove()
-            self.button_grid.grid()
+            self.button_grid.grid(row=2, column=0, columnspan=2, sticky="nsew")
 
             if level == 2:
                 self.title_lbl.config(text=f"{bt} — {province} 下辖层级")
