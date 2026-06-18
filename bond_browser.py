@@ -809,15 +809,24 @@ class BondBrowserApp(tk.Tk):
             frozen_tree.bind("<MouseWheel>", on_wheel)
             scroll_tree.bind("<Shift-MouseWheel>", lambda e, t=scroll_tree: t.xview_scroll(int(-1 * (e.delta / 120)), "units") or "break")
 
-            # 选择同步
+            # 选择同步：按行号同步（两棵树行数、顺序一致），避免事件乒乓
             def sync_select(event, ft=frozen_tree, st=scroll_tree):
                 src = event.widget
                 sel = src.selection()
                 if not sel:
                     return
                 target = st if src == ft else ft
-                target.selection_set(sel)
-                target.see(sel[0])
+                try:
+                    idx = src.index(sel[0])
+                    target_items = target.get_children()
+                    if 0 <= idx < len(target_items):
+                        target_sel = target.selection()
+                        if target_sel and target.index(target_sel[0]) == idx:
+                            return
+                        target.selection_set(target_items[idx])
+                        target.see(target_items[idx])
+                except Exception:
+                    pass
             scroll_tree.bind("<<TreeviewSelect>>", sync_select)
             frozen_tree.bind("<<TreeviewSelect>>", sync_select)
 
