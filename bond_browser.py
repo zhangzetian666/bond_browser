@@ -108,25 +108,45 @@ class ScrollableButtonGrid(ttk.Frame):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
 
+    def _bind_mousewheel_recursive(self, widget):
+        """递归绑定鼠标滚轮到所有子控件，确保在按钮上也能滚动。"""
+        widget.bind("<MouseWheel>", self._on_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child)
+
     def clear(self):
         for child in self.inner.winfo_children():
             child.destroy()
 
-    def add_button(self, row, col, text, command, width=16):
-        btn = ttk.Button(self.inner, text=text, width=width, command=command)
-        btn.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+    def add_button(self, row, col, text, command, width=16, font=("楷体", 10)):
+        btn = tk.Button(
+            self.inner,
+            text=text,
+            width=width,
+            command=command,
+            font=font,
+            bg="#f8f9fa",
+            fg="black",
+            activebackground="#e2e6ea",
+            relief="raised",
+            bd=2,
+        )
+        btn.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+        # 确保鼠标在按钮上也能滚轮滚动
+        btn.bind("<MouseWheel>", self._on_mousewheel)
         return btn
 
-    def fill(self, items, callback, btn_width=16):
+    def fill(self, items, callback, btn_width=16, btn_font=("楷体", 11, "bold")):
         """items: [(name, count, tag), ...]; callback(tag)"""
         self.clear()
         for i, (name, count, tag) in enumerate(items):
             r, c = divmod(i, self.cols)
-            text = f"{name}\n({count})"
-            self.add_button(r, c, text, lambda t=tag: callback(t), width=btn_width)
+            text = f"{name}（{count}家）"
+            self.add_button(r, c, text, lambda t=tag: callback(t), width=btn_width, font=btn_font)
         for c in range(self.cols):
             self.inner.columnconfigure(c, weight=1)
-
+        # 重新绑定所有子控件的滚轮事件
+        self._bind_mousewheel_recursive(self.inner)
 
 
 
@@ -323,31 +343,24 @@ class ProvinceMapCanvas(tk.Canvas):
                 centroid_x, centroid_y = self._project(first[0], first[1])
 
             tid = None
-            cid = None
             if bbox_area >= 600:
                 display_name = short_name
                 name_font = ("Microsoft YaHei", 12, "bold")
-                name_dy = -8
                 if bbox_area < 1800:
                     # 较小省份只显示名称，字体稍小
                     name_font = ("Microsoft YaHei", 10, "bold")
-                    name_dy = 0
+                text = display_name
+                if bbox_area >= 1800 and count > 0:
+                    text = f"{display_name}（{count}家）"
                 tid = self.create_text(
-                    centroid_x, centroid_y + name_dy,
-                    text=display_name, font=name_font,
+                    centroid_x, centroid_y,
+                    text=text, font=name_font,
                     fill="black", justify="center"
                 )
-                if bbox_area >= 1800:
-                    cid = self.create_text(
-                        centroid_x, centroid_y + 12,
-                        text=f"{count}家", font=("Microsoft YaHei", 10, "bold"),
-                        fill="black", justify="center"
-                    )
 
             self.items[short_name] = {
                 "polygons": poly_ids,
                 "text": tid,
-                "count_text": cid,
                 "base_color": color,
             }
 
@@ -656,7 +669,7 @@ class BondBrowserApp(tk.Tk):
         self.nav_sub_frame.grid(row=0, column=0, sticky="nsew")
         self.nav_sub_frame.rowconfigure(2, weight=1)
         self.nav_sub_frame.columnconfigure(0, weight=1)
-        self.nav_sub_frame.columnconfigure(1, weight=3)
+        self.nav_sub_frame.columnconfigure(1, weight=4)
         self.nav_sub_frame.grid_remove()
 
         self.nav_hint = ttk.Label(self.nav_sub_frame, text="")
@@ -728,7 +741,7 @@ class BondBrowserApp(tk.Tk):
         self.tab_bar = ttk.Frame(parent)
         self.tab_bar.grid(row=1, column=0, sticky="ew", pady=(0, 5))
 
-        self.tab_trees = {}
+        self.tab_trees = {}        # tab_name -> (frozen_tree, scroll_tree)
         self.tab_frames = {}
         self.tab_buttons = {}
         self.current_tab = None
@@ -742,28 +755,75 @@ class BondBrowserApp(tk.Tk):
             tree_frame = ttk.Frame(frame)
             tree_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
             tree_frame.rowconfigure(0, weight=1)
-            tree_frame.columnconfigure(0, weight=1)
+            tree_frame.columnconfigure(1, weight=1)
 
-            vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
+            # 冻结列（发行人名称）放在左侧
+            frozen_frame = ttk.Frame(tree_frame)
+            frozen_frame.grid(row=0, column=0, sticky="nsew")
+            frozen_frame.rowconfigure(0, weight=1)
+            frozen_frame.columnconfigure(0, weight=1)
+
+            frozen_tree = ttk.Treeview(
+                frozen_frame,
+                show="headings",
+                selectmode="browse",
+                height=10,
+            )
+            frozen_tree.grid(row=0, column=0, sticky="nsew")
+
+            # 可滚动列放在右侧
+            right_frame = ttk.Frame(tree_frame)
+            right_frame.grid(row=0, column=1, sticky="nsew")
+            right_frame.rowconfigure(0, weight=1)
+            right_frame.columnconfigure(0, weight=1)
+
+            vsb = ttk.Scrollbar(right_frame, orient=tk.VERTICAL)
             vsb.grid(row=0, column=1, sticky="ns")
             hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL)
-            hsb.grid(row=1, column=0, sticky="ew")
+            hsb.grid(row=1, column=0, columnspan=2, sticky="ew")
 
-            tree = ttk.Treeview(
-                tree_frame,
-                yscrollcommand=vsb.set,
+            scroll_tree = ttk.Treeview(
+                right_frame,
                 xscrollcommand=hsb.set,
                 show="headings",
+                selectmode="browse",
+                height=10,
             )
-            tree.grid(row=0, column=0, sticky="nsew")
-            vsb.config(command=tree.yview)
-            hsb.config(command=tree.xview)
+            scroll_tree.grid(row=0, column=0, sticky="nsew")
+            vsb.config(command=scroll_tree.yview)
+            hsb.config(command=scroll_tree.xview)
 
-            tree.bind("<MouseWheel>", lambda e, t=tree: t.yview_scroll(int(-1 * (e.delta / 120)), "units") or "break")
-            tree.bind("<Shift-MouseWheel>", lambda e, t=tree: t.xview_scroll(int(-1 * (e.delta / 120)), "units") or "break")
+            # 垂直滚动同步：scroll_tree 为主，frozen_tree 跟随
+            def sync_yscroll(ft=frozen_tree, st=scroll_tree, v=vsb):
+                def callback(first, last):
+                    v.set(first, last)
+                    ft.yview_moveto(first)
+                return callback
+            scroll_tree.config(yscrollcommand=sync_yscroll())
 
-            self._setup_copy_menu(tree)
-            self.tab_trees[tab_name] = tree
+            # 鼠标滚轮：两个 tree 都绑定到 scroll_tree 的滚动
+            def on_wheel(event, t=scroll_tree):
+                t.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            scroll_tree.bind("<MouseWheel>", on_wheel)
+            frozen_tree.bind("<MouseWheel>", on_wheel)
+            scroll_tree.bind("<Shift-MouseWheel>", lambda e, t=scroll_tree: t.xview_scroll(int(-1 * (e.delta / 120)), "units") or "break")
+
+            # 选择同步
+            def sync_select(event, ft=frozen_tree, st=scroll_tree):
+                src = event.widget
+                sel = src.selection()
+                if not sel:
+                    return
+                target = st if src == ft else ft
+                target.selection_set(sel)
+                target.see(sel[0])
+            scroll_tree.bind("<<TreeviewSelect>>", sync_select)
+            frozen_tree.bind("<<TreeviewSelect>>", sync_select)
+
+            self._setup_copy_menu(scroll_tree)
+            self._setup_copy_menu(frozen_tree)
+            self.tab_trees[tab_name] = (frozen_tree, scroll_tree)
 
             btn = tk.Button(
                 self.tab_bar,
@@ -815,7 +875,8 @@ class BondBrowserApp(tk.Tk):
             return
         values = tree.item(row_id, "values")
         try:
-            idx = int(str(col_id).replace("#", "").replace("c", ""))
+            # Treeview identify_column 返回 #1、#2…表示第 1/2 个显示列
+            idx = int(str(col_id).replace("#", "")) - 1
         except ValueError:
             return
         if 0 <= idx < len(values):
@@ -912,24 +973,39 @@ class BondBrowserApp(tk.Tk):
         """配置全局 ttk 样式：滚动条加粗，标题字体加粗等。"""
         style = ttk.Style(self)
         # 滚动条加粗
-        style.configure("Vertical.TScrollbar", width=26, background="#d0d0d0", troughcolor="#f0f0f0", bordercolor="#c0c0c0")
-        style.configure("Horizontal.TScrollbar", width=26, background="#d0d0d0", troughcolor="#f0f0f0", bordercolor="#c0c0c0")
+        style.configure("Vertical.TScrollbar", width=34, background="#0d6efd", troughcolor="#e9ecef", bordercolor="#0d6efd", arrowcolor="white")
+        style.configure("Horizontal.TScrollbar", width=34, background="#0d6efd", troughcolor="#e9ecef", bordercolor="#0d6efd", arrowcolor="white")
         # Treeview 表头加粗
         style.configure("Treeview.Heading", font=("Microsoft YaHei", 10, "bold"))
 
     def _setup_detail_columns(self):
-        """仅初始化列标识与表头文字，宽度在 _show_detail 中按内容自适应。"""
-        for tab_name, tree in self.tab_trees.items():
+        """仅初始化列标识与表头文字，宽度在 _show_detail 中按内容自适应。
+        发行人名称列默认冻结在左侧。"""
+        for tab_name, (frozen_tree, scroll_tree) in self.tab_trees.items():
             cols = self.TAB_COLUMNS[tab_name]
-            tree["columns"] = [f"{tab_name}_{i}" for i in range(len(cols))]
-            for i, (display_name, _) in enumerate(cols):
+            # 找到要冻结的列：优先“发行人名称”，否则第一列
+            freeze_idx = 0
+            for i, (name, _) in enumerate(cols):
+                if name == "发行人名称":
+                    freeze_idx = i
+                    break
+
+            frozen_tree["columns"] = [f"{tab_name}_f{freeze_idx}"]
+            frozen_tree.heading(f"{tab_name}_f{freeze_idx}", text=cols[freeze_idx][0])
+            frozen_tree.column(f"{tab_name}_f{freeze_idx}", width=80, anchor="w", stretch=False)
+
+            scroll_cols = [i for i in range(len(cols)) if i != freeze_idx]
+            scroll_tree["columns"] = [f"{tab_name}_{i}" for i in scroll_cols]
+            for i in scroll_cols:
                 cid = f"{tab_name}_{i}"
-                tree.heading(cid, text=display_name)
-                tree.column(cid, width=80, anchor="w", stretch=False)
+                scroll_tree.heading(cid, text=cols[i][0])
+                scroll_tree.column(cid, width=80, anchor="w", stretch=False)
+
+            self.tab_trees[tab_name] = (frozen_tree, scroll_tree, freeze_idx)
 
     def _auto_fit_columns(self, rows):
-        """根据表头和数据内容自动调整所有 Tab 的列宽。"""
-        for tab_name, tree in self.tab_trees.items():
+        """根据表头和数据内容自动调整所有 Tab 的列宽（含冻结列）。"""
+        for tab_name, (frozen_tree, scroll_tree, freeze_idx) in self.tab_trees.items():
             cols = self.TAB_COLUMNS[tab_name]
             widths = [len(display_name) for display_name, _ in cols]
 
@@ -944,11 +1020,17 @@ class BondBrowserApp(tk.Tk):
                         val = str(r[src] if src < len(r) else "")
                     widths[i] = max(widths[i], len(val))
 
-            for i, (display_name, _) in enumerate(cols):
+            # 冻结列
+            w = max(80, min(400, widths[freeze_idx] * 12 + 30))
+            frozen_tree.column(f"{tab_name}_f{freeze_idx}", width=w)
+
+            # 滚动列
+            for i in range(len(cols)):
+                if i == freeze_idx:
+                    continue
                 cid = f"{tab_name}_{i}"
-                # 中文字符按 14px，英文/数字按 10px，加两侧 padding
                 w = max(80, min(600, widths[i] * 12 + 30))
-                tree.column(cid, width=w)
+                scroll_tree.column(cid, width=w)
 
     # ------------------------------------------------------------------
     # 认证弹窗
@@ -1066,17 +1148,19 @@ class BondBrowserApp(tk.Tk):
         in_muni = self._is_municipality(province)
         if r[self.COL_PROVINCIAL] == "是":
             return "provincial"
-        if in_muni:
-            if r[self.COL_MUNICIPAL] == "是":
-                return "municipal"
-        else:
-            if r[self.COL_MUNICIPAL] == "是":
-                return "municipal"
-        if r[self.COL_COUNTY] == "是" or r[self.COL_DISTRICT]:
-            return "county"
-        if r[self.COL_CITY]:
+        if r[self.COL_MUNICIPAL] == "是":
             return "municipal"
-        return "municipal" if in_muni else "provincial"
+        if r[self.COL_COUNTY] == "是":
+            return "county"
+        # 无明确层级标记时，按所属市/区县字段兜底判断
+        city = r[self.COL_CITY]
+        district = r[self.COL_DISTRICT]
+        if not city and not district:
+            # 直辖市无市/区县字段时，视为市本级；其余省份视为省本级
+            return "municipal" if in_muni else "provincial"
+        if city and not district:
+            return "municipal"
+        return "county"
 
     def _filter_rows(self, bond_type=None, province=None, city=None, district=None, exclude_central=True):
         result = []
@@ -1130,7 +1214,7 @@ class BondBrowserApp(tk.Tk):
             self.button_grid.grid_remove()
             self.left_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
             self.right_frame.grid(row=2, column=1, sticky="nsew")
-            self.province_list.fill(items, self._on_national_item_click, btn_width=12)
+            self.province_list.fill(items, self._on_national_item_click, btn_width=8)
             self.province_map.update_counts(province_counts)
             self.province_map.on_select = lambda name: self._show_level(2, province=name)
             self.province_map.grid()
@@ -1147,14 +1231,14 @@ class BondBrowserApp(tk.Tk):
                 self.title_lbl.config(text=f"{bt} — {province} 下辖层级")
                 self.nav_hint.config(text="点击层级查看发债主体明细。")
                 items = self._get_province_items(province)
-                self.button_grid.fill(items, self._on_province_item_click)
+                self.button_grid.fill(items, self._on_province_item_click, btn_width=10)
                 self.status_lbl.config(text=self._province_status(province, items))
 
             elif level == 3:
                 self.title_lbl.config(text=f"{bt} — {province} · {city} 下辖层级")
                 self.nav_hint.config(text="点击层级查看发债主体明细。")
                 items = self._get_city_items(province, city)
-                self.button_grid.fill(items, self._on_city_item_click)
+                self.button_grid.fill(items, self._on_city_item_click, btn_width=10)
                 self.status_lbl.config(text=self._city_status(items))
 
     def _get_national_items(self, bond_type):
@@ -1210,14 +1294,25 @@ class BondBrowserApp(tk.Tk):
         items = []
         muni_count = 0
         district_counts = {}
+        in_muni = self._is_municipality(province)
         for r in self._filter_rows(bond_type=self.current_bond_type, province=province, city=city):
             level = self._row_level(r, province)
-            if level in ("provincial", "municipal"):
-                muni_count += 1
-            elif level == "county":
-                d = r[self.COL_DISTRICT]
-                if d:
-                    district_counts[d] = district_counts.get(d, 0) + 1
+            if in_muni:
+                # 直辖市：省级/市级都归入市本级
+                if level in ("provincial", "municipal"):
+                    muni_count += 1
+                elif level == "county":
+                    d = r[self.COL_DISTRICT]
+                    if d:
+                        district_counts[d] = district_counts.get(d, 0) + 1
+            else:
+                # 普通省：只有市级归入本市市本级；省级应在省本级，不要混进来
+                if level == "municipal":
+                    muni_count += 1
+                elif level == "county":
+                    d = r[self.COL_DISTRICT]
+                    if d:
+                        district_counts[d] = district_counts.get(d, 0) + 1
         items.append(("市本级", muni_count, "MUNICIPAL"))
         for d, c in sorted(district_counts.items(), key=lambda x: -x[1]):
             items.append((d, c, d))
@@ -1254,24 +1349,42 @@ class BondBrowserApp(tk.Tk):
     def _on_province_item_click(self, tag):
         province = self.current_province
         bt = self.current_bond_type
+        in_muni = self._is_municipality(province)
         if tag == "MUNICIPAL":
-            rows = [r for r in self._filter_rows(bond_type=bt, province=province)
-                    if self._row_level(r, province) in ("provincial", "municipal")]
+            if in_muni:
+                rows = [r for r in self._filter_rows(bond_type=bt, province=province)
+                        if self._row_level(r, province) in ("provincial", "municipal")]
+            else:
+                # 普通省份的“市本级”按钮不会出现，此处做兜底
+                rows = [r for r in self._filter_rows(bond_type=bt, province=province)
+                        if self._row_level(r, province) == "municipal"]
             self._show_detail(f"{province} 市本级", rows)
         elif tag == "PROVINCIAL":
             rows = [r for r in self._filter_rows(bond_type=bt, province=province)
                     if self._row_level(r, province) == "provincial"]
             self._show_detail(f"{province} 省本级", rows)
         else:
-            self._show_level(3, province=province, city=tag)
+            if in_muni:
+                # 直辖市：tag 是区/县名，直接显示该区县的区县级记录
+                rows = [r for r in self._filter_rows(bond_type=bt, province=province, district=tag)
+                        if self._row_level(r, province) == "county"]
+                self._show_detail(f"{province} {tag}", rows)
+            else:
+                self._show_level(3, province=province, city=tag)
 
     def _on_city_item_click(self, tag):
         province = self.current_province
         city = self.current_city
         bt = self.current_bond_type
+        in_muni = self._is_municipality(province)
         if tag == "MUNICIPAL":
-            rows = [r for r in self._filter_rows(bond_type=bt, province=province, city=city)
-                    if self._row_level(r, province) in ("provincial", "municipal")]
+            if in_muni:
+                rows = [r for r in self._filter_rows(bond_type=bt, province=province, city=city)
+                        if self._row_level(r, province) in ("provincial", "municipal")]
+            else:
+                # 普通地级市市本级只包含市级记录，不要混入省级
+                rows = [r for r in self._filter_rows(bond_type=bt, province=province, city=city)
+                        if self._row_level(r, province) == "municipal"]
             self._show_detail(f"{city} 市本级", rows)
         else:
             rows = [r for r in self._filter_rows(bond_type=bt, province=province, city=city, district=tag)
@@ -1304,8 +1417,9 @@ class BondBrowserApp(tk.Tk):
         self.title_lbl.config(text="发债主体信息")
         self.status_lbl.config(text="正在加载明细…")
 
-        for tree in self.tab_trees.values():
-            tree.delete(*tree.get_children())
+        for frozen_tree, scroll_tree, _ in self.tab_trees.values():
+            frozen_tree.delete(*frozen_tree.get_children())
+            scroll_tree.delete(*scroll_tree.get_children())
 
         self._auto_fit_columns(rows)
         self._current_detail_rows = rows
@@ -1313,7 +1427,7 @@ class BondBrowserApp(tk.Tk):
         self._populate_tab_batch("汇总", rows, 0)
 
     def _populate_tab_batch(self, tab_name, rows, start):
-        tree = self.tab_trees[tab_name]
+        frozen_tree, scroll_tree, freeze_idx = self.tab_trees[tab_name]
         cols = self.TAB_COLUMNS[tab_name]
         end = min(start + self.INSERT_BATCH, len(rows))
         for r in rows[start:end]:
@@ -1326,7 +1440,9 @@ class BondBrowserApp(tk.Tk):
                         values.append("")
                 else:
                     values.append(r[src] if src < len(r) else "")
-            tree.insert("", tk.END, values=values)
+            frozen_tree.insert("", tk.END, values=[values[freeze_idx]])
+            scroll_values = [v for i, v in enumerate(values) if i != freeze_idx]
+            scroll_tree.insert("", tk.END, values=scroll_values)
 
         if end < len(rows):
             self.status_lbl.config(text=f"正在加载 {tab_name}… {end}/{len(rows)}")
