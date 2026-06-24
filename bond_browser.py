@@ -118,31 +118,51 @@ class ScrollableButtonGrid(ttk.Frame):
         for child in self.inner.winfo_children():
             child.destroy()
 
-    def add_button(self, row, col, text, command, width=16, font=("楷体", 10)):
-        btn = tk.Button(
-            self.inner,
-            text=text,
-            width=width,
-            command=command,
-            font=font,
-            bg="#f8f9fa",
-            fg="black",
-            activebackground="#e2e6ea",
-            relief="raised",
-            bd=2,
-        )
-        btn.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+    def add_button(self, row, col, text, command, width=16, font=("楷体", 10),
+                   padx=4, pady=4, internal_padx=0, internal_pady=0, highlightthickness=0, bd=2,
+                   sticky="nsew"):
+        kwargs = {
+            "text": text,
+            "command": command,
+            "font": font,
+            "bg": "#f8f9fa",
+            "fg": "black",
+            "activebackground": "#e2e6ea",
+            "relief": "raised",
+            "bd": bd,
+            "padx": internal_padx,
+            "pady": internal_pady,
+            "highlightthickness": highlightthickness,
+        }
+        if width is not None:
+            kwargs["width"] = width
+        btn = tk.Button(self.inner, **kwargs)
+        btn.grid(row=row, column=col, padx=padx, pady=pady, sticky=sticky)
         # 确保鼠标在按钮上也能滚轮滚动
         btn.bind("<MouseWheel>", self._on_mousewheel)
         return btn
 
-    def fill(self, items, callback, btn_width=16, btn_font=("楷体", 11, "bold")):
-        """items: [(name, count, tag), ...]; callback(tag)"""
+    @staticmethod
+    def _estimate_text_width(text):
+        """估算文本在 tk Button 中所需的宽度，按字符长度并留一点余量防止截断。"""
+        return len(text) + 1
+
+    def fill(self, items, callback, btn_width=16, btn_font=("楷体", 11, "bold"),
+             btn_padx=4, btn_pady=4, text_fmt="{name}（{count}家）",
+             btn_internal_padx=0, btn_internal_pady=0, btn_bd=2, btn_sticky="nsew"):
+        """items: [(name, count, tag), ...]; callback(tag)
+        btn_width=None 时按每个按钮的文字独立计算宽度，不统一拉伸。"""
         self.clear()
         for i, (name, count, tag) in enumerate(items):
             r, c = divmod(i, self.cols)
-            text = f"{name}（{count}家）"
-            self.add_button(r, c, text, lambda t=tag: callback(t), width=btn_width, font=btn_font)
+            text = text_fmt.format(name=name, count=count)
+            width = btn_width
+            if width is None:
+                width = self._estimate_text_width(text)
+            self.add_button(r, c, text, lambda t=tag: callback(t), width=width, font=btn_font,
+                            padx=btn_padx, pady=btn_pady,
+                            internal_padx=btn_internal_padx, internal_pady=btn_internal_pady,
+                            bd=btn_bd, sticky=btn_sticky)
         for c in range(self.cols):
             self.inner.columnconfigure(c, weight=1)
         # 重新绑定所有子控件的滚轮事件
@@ -343,15 +363,16 @@ class ProvinceMapCanvas(tk.Canvas):
                 centroid_x, centroid_y = self._project(first[0], first[1])
 
             tid = None
-            if bbox_area >= 600:
+            # 有发债主体的省份一律显示标签；无主体但面积较大的省份也显示名称
+            if bbox_area >= 200 or count > 0:
                 display_name = short_name
-                name_font = ("Microsoft YaHei", 12, "bold")
-                if bbox_area < 1800:
-                    # 较小省份只显示名称，字体稍小
-                    name_font = ("Microsoft YaHei", 10, "bold")
+                name_font = ("Microsoft YaHei", 8)
+                if bbox_area < 600:
+                    # 较小省份字体再小一号
+                    name_font = ("Microsoft YaHei", 7)
                 text = display_name
-                if bbox_area >= 1800 and count > 0:
-                    text = f"{display_name}（{count}家）"
+                if count > 0:
+                    text = f"{display_name}\n（{count}家）"
                 tid = self.create_text(
                     centroid_x, centroid_y,
                     text=text, font=name_font,
@@ -483,7 +504,7 @@ class ProvinceMapCanvas(tk.Canvas):
 
 
 class BondBrowserApp(tk.Tk):
-    EXCEL_FILE = "债券数据浏览器20260616-v6.xlsx"
+    EXCEL_FILE = "20260616-v7.xlsx"
     USERS_FILE = "债市读者的问答社区-用户活跃-成员数据报表（所有成员).xlsx"
 
     # 兼容引用（也保留类属性，方便内部统一使用 self.XXX）
@@ -574,8 +595,8 @@ class BondBrowserApp(tk.Tk):
             ("2025年末所有者权益总计（亿元）", COL_TOTAL_EQUITY),
             ("2025年营业总收入（亿元）", COL_TOTAL_REVENUE),
             ("2025年净利润（亿元）", COL_NET_PROFIT),
-            ("2024年度经营活动现金流净额", COL_CASH_FLOW_2024),
-            ("2025年度经营活动现金流净额", COL_CASH_FLOW_2025),
+            ("2024年度经营活动现金流净额（亿元）", COL_CASH_FLOW_2024),
+            ("2025年度经营活动现金流净额（亿元）", COL_CASH_FLOW_2025),
             ("2025年总资产报酬率(%)", COL_ROA),
         ],
         "第一大收入构成": [
@@ -668,25 +689,13 @@ class BondBrowserApp(tk.Tk):
         self.nav_sub_frame = ttk.Frame(self.nav_frame)
         self.nav_sub_frame.grid(row=0, column=0, sticky="nsew")
         self.nav_sub_frame.rowconfigure(2, weight=1)
-        self.nav_sub_frame.columnconfigure(0, weight=1)
-        self.nav_sub_frame.columnconfigure(1, weight=4)
+        # 左侧省份列表仅展示一列，固定宽度；右侧地图占据剩余全部空间
+        self.nav_sub_frame.columnconfigure(0, weight=0)
+        self.nav_sub_frame.columnconfigure(1, weight=1)
         self.nav_sub_frame.grid_remove()
 
         self.nav_hint = ttk.Label(self.nav_sub_frame, text="")
         self.nav_hint.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-
-        self.central_btn = tk.Button(
-            self.nav_sub_frame,
-            text="央企（0家）",
-            font=("Microsoft YaHei", 12, "bold"),
-            bg="#6f42c1",
-            fg="white",
-            activebackground="#5a32a3",
-            width=20,
-            command=self._on_central_btn_click,
-        )
-        self.central_btn.grid(row=1, column=0, columnspan=2, pady=(0, 10))
-        self.central_btn.grid_remove()
 
         # 左侧省份按钮列表（含央企）
         self.left_frame = ttk.Frame(self.nav_sub_frame)
@@ -1152,10 +1161,15 @@ class BondBrowserApp(tk.Tk):
     def _is_municipality(self, province):
         return province in self.MUNICIPALITIES
 
+    def _is_provincial_row(self, r):
+        """是否省级国企：'是否省级国企'字段为'是'时即视为省本级。"""
+        return str(r[self.COL_PROVINCIAL] or "").strip() == "是"
+
     def _row_level(self, r, province):
         """判断一行数据在该省份下属于哪个层级。央企已在国家级单独处理。"""
         in_muni = self._is_municipality(province)
-        if r[self.COL_PROVINCIAL] == "是":
+        # 是否省级国企为'是'时，强制纳入省本级，不受所属市/区县字段影响
+        if self._is_provincial_row(r):
             return "provincial"
         if r[self.COL_MUNICIPAL] == "是":
             return "municipal"
@@ -1193,13 +1207,6 @@ class BondBrowserApp(tk.Tk):
     # ------------------------------------------------------------------
     # 导航逻辑
     # ------------------------------------------------------------------
-    def _on_central_btn_click(self):
-        rows = self._central_rows(self.current_bond_type)
-        if rows:
-            self._show_detail("— 央企", rows)
-        else:
-            messagebox.showinfo("提示", "当前债券类型下没有央企数据。")
-
     def _show_level(self, level, province=None, city=None):
         self.current_level = level
         self.current_province = province
@@ -1216,21 +1223,21 @@ class BondBrowserApp(tk.Tk):
             self.title_lbl.config(text=f"{bt} — 全国省份/央企")
             self.nav_hint.config(text="左侧为省份/央企按钮，右侧为地图；点击任意省份进入该省下辖层级。")
             items = self._get_national_items(bt)
-            central = next((c for n, c, t in items if t == "CENTRAL"), 0)
             province_counts = {p: c for p, c, t in items if t not in ("CENTRAL",)}
-            self.central_btn.config(text=f"央企（{central}家）")
-            self.central_btn.grid()
             self.button_grid.grid_remove()
-            self.left_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8))
+            self.left_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 4))
             self.right_frame.grid(row=2, column=1, sticky="nsew")
-            self.province_list.fill(items, self._on_national_item_click, btn_width=8)
+            self.province_list.fill(
+                items, self._on_national_item_click,
+                btn_width=None, btn_font=("楷体", 11, "bold"),
+                btn_padx=4, btn_pady=4,
+            )
             self.province_map.update_counts(province_counts)
             self.province_map.on_select = lambda name: self._show_level(2, province=name)
             self.province_map.grid()
             self.status_lbl.config(text=self._national_status(bt, items))
 
         else:
-            self.central_btn.grid_remove()
             self.left_frame.grid_remove()
             self.right_frame.grid_remove()
             self.province_map.grid_remove()
@@ -1287,6 +1294,10 @@ class BondBrowserApp(tk.Tk):
             prov_count = 0
             city_counts = {}
             for r in self._filter_rows(bond_type=self.current_bond_type, province=province):
+                # 省级国企强制归为省本级，不再按所属市统计
+                if self._is_provincial_row(r):
+                    prov_count += 1
+                    continue
                 level = self._row_level(r, province)
                 if level == "provincial":
                     prov_count += 1
@@ -1315,7 +1326,9 @@ class BondBrowserApp(tk.Tk):
                     if d:
                         district_counts[d] = district_counts.get(d, 0) + 1
             else:
-                # 普通省：只有市级归入本市市本级；省级应在省本级，不要混进来
+                # 普通省：只有市级归入本市市本级；省级国企必须排除在外
+                if self._is_provincial_row(r):
+                    continue
                 if level == "municipal":
                     muni_count += 1
                 elif level == "county":
